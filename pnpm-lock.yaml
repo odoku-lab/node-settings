@@ -12,8 +12,8 @@ importers:
         specifier: ^4.0.0
         version: 4.2.1
       dotenv:
-        specifier: ^16.0.0
-        version: 16.6.1
+        specifier: ^17.4.2
+        version: 17.4.2
     devDependencies:
       '@biomejs/biome':
         specifier: 2.4.15
@@ -442,8 +442,8 @@ packages:
     resolution: {integrity: sha512-h5k/5U50IJJFpzfL6nO9jaaumfjO/f2NjK/oYB2Djzm4p9L+3T9qWpZqZ2hAbLPuuYq9wrU08WQyBTL5GbPk5Q==}
     engines: {node: '>=6'}
 
-  dotenv@16.6.1:
-    resolution: {integrity: sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==}
+  dotenv@17.4.2:
+    resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
     engines: {node: '>=12'}
 
   es-module-lexer@1.7.0:
@@ -868,7 +868,7 @@ snapshots:
 
   deep-eql@5.0.2: {}
 
-  dotenv@16.6.1: {}
+  dotenv@17.4.2: {}
 
   es-module-lexer@1.7.0: {}
 
