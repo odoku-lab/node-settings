@@ -27,6 +27,9 @@ pnpm-debug.log*
 # Dev notes
 TODO.md
 
+# pnpm workspace config (single-package repo)
+pnpm-workspace.yaml
+
 # OS files
 .DS_Store
 Thumbs.db
