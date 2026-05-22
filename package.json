@@ -1,0 +1,89 @@
+{
+  "name": "@odoku-lab/settings",
+  "version": "0.1.0",
+  "description": "A type-safe environment variable settings loader for Node.js",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "sideEffects": false,
+  "author": "odoku-lab",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/odoku-lab/node-settings.git"
+  },
+  "bugs": {
+    "url": "https://github.com/odoku-lab/node-settings/issues"
+  },
+  "homepage": "https://github.com/odoku-lab/node-settings#readme",
+  "keywords": [
+    "settings",
+    "env",
+    "configuration",
+    "typescript",
+    "environment-variables"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./fields": {
+      "types": "./dist/fields.d.ts",
+      "import": "./dist/fields.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "date-fns": "^4.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "peerDependencies": {
+    "valibot": ">=0.31.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    },
+    "valibot": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.3",
+    "valibot": "^1.4.0",
+    "vitest": "^2.0.0",
+    "zod": "^3.25.76"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}
