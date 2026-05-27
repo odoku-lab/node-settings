@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "date-fns": "^4.0.0",
-    "dotenv": "^16.0.0"
+    "dotenv": "^17.4.2"
   },
   "peerDependencies": {
     "valibot": ">=0.31.0",
@@ -70,11 +70,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.15",
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.9.1",
     "typescript": "^6.0.3",
     "valibot": "^1.4.0",
-    "vitest": "^2.0.0",
-    "zod": "^3.25.76"
+    "vitest": "^4.1.7",
+    "zod": "^4.4.3"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
