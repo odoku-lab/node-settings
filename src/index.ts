@@ -1,158 +1,96 @@
-import { SettingsError, SettingsValidationError } from "./errors.js";
-import type { FieldDef } from "./fields.js";
-import _fields, { isField, isTemplateField } from "./fields.js";
-import type { EnvSource } from "./loader.js";
-import { buildEnvSource } from "./loader.js";
-import { resolveTemplate } from "./resolver.js";
+import { SchemaDefinitionError } from "./errors.js";
+import { buildStore } from "./resolver.js";
+import { createSettingsProxy, type DeepPartial } from "./settings.js";
+import type { EnvSource, InferSettings, SettingsSchema } from "./types/core.js";
+import _types from "./types/index.js";
 
+export * from "./adapters/index.js";
 export {
+  FrozenSettingsError,
   InvalidValueError,
   MissingEnvError,
   SchemaDefinitionError,
   SettingsError,
   SettingsValidationError,
 } from "./errors.js";
+export { getAdapter, hasAdapter, registerAdapter } from "./secret.js";
 export type {
-  EnvKey,
-  FieldDef,
-} from "./fields.js";
-export const fields = _fields;
+  AsyncAccessor,
+  InferRawSettings,
+  InferSettings,
+  SettingsSchema,
+  SyncAccessor,
+  TypeDef,
+} from "./types/core.js";
+export type { SecretOptions } from "./types/secret.js";
+export type { DeepPartial };
+export const types = _types;
 
-// ── SettingsSchema / Type inference ────────────────────────────────────────────
+// Method names starting with $ are reserved by the schema
+const RESERVED_SCHEMA_KEYS = new Set(["$mutate", "$reset", "$load"]);
 
-export type SettingsSchema = Record<string, unknown>;
-
-type InferValue<T> =
-  T extends FieldDef<infer V>
-    ? V
-    : T extends globalThis.Date
-      ? T
-      : T extends readonly unknown[]
-        ? T
-        : T extends object
-          ? null extends T
-            ? T
-            : { [K in keyof T]: InferValue<T[K]> }
-          : T;
-
-export type InferSettings<T extends SettingsSchema> = {
-  [K in keyof T]: InferValue<T[K]>;
+type MutableSettings<T> = T & {
+  $mutate(overrides: DeepPartial<T>): void;
+  $reset(): void;
+  $load(): Promise<void>;
 };
 
-// ── SettingsOptions ───────────────────────────────────────────────────────────
-
-/** Options for {@link loadSettings}. */
 export interface SettingsOptions {
-  /** Prefix prepended to all environment variable keys (e.g. "APP_"). */
   prefix?: string;
-  /** Path to a .env file to load. Does not pollute `process.env`. */
-  envFile?: string;
-}
-
-// ── プレーンオブジェクト判定 ──────────────────────────────────────────────────
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
-}
-
-// ── resolve ───────────────────────────────────────────────────────────────────
-
-/**
- * Recursively resolves a single value from the schema.
- * - `FieldDef` (non-template): calls `_resolve()`
- * - Template field: returns `undefined` (resolved in Pass 2)
- * - Date / Array / primitive: returned as-is (constant value)
- * - Plain object: recurses into each entry
- * Errors are collected into the `errors` array; problematic values return `undefined`.
- */
-function resolveValue(
-  value: unknown,
-  schemaKey: string,
-  prefix: string,
-  env: EnvSource,
-  errors: SettingsError[],
-): unknown {
-  if (isField(value)) {
-    if (isTemplateField(value)) return undefined; // Pass 2 で解決
-    try {
-      return value._resolve(schemaKey, prefix, env);
-    } catch (error) {
-      if (error instanceof SettingsError) {
-        errors.push(error);
-        return undefined;
-      }
-      throw error;
-    }
-  }
-  if (isPlainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, resolveValue(v, k, prefix, env, errors)]),
-    );
-  }
-  return value;
+  source?: Record<string, string | undefined>;
+  frozen?: boolean;
+  maskSecrets?: boolean;
+  changeCase?: boolean;
 }
 
 /**
- * Pass 2: Recursively resolves template fields using the already-resolved values.
- * Errors are collected; resolution continues even if some templates fail.
- */
-function resolveTemplates(
-  schema: Record<string, unknown>,
-  resolved: Record<string, unknown>,
-  root: Record<string, unknown>,
-  errors: SettingsError[],
-): void {
-  for (const [key, value] of Object.entries(schema)) {
-    if (isTemplateField(value)) {
-      try {
-        resolved[key] = resolveTemplate(value._template, root);
-      } catch (error) {
-        if (error instanceof SettingsError) {
-          errors.push(error);
-          continue;
-        }
-        throw error;
-      }
-    } else if (isPlainObject(value)) {
-      resolveTemplates(value, resolved[key] as Record<string, unknown>, root, errors);
-    }
-  }
-}
-
-// ── loadSettings ─────────────────────────────────────────────────────────────
-
-/**
- * Creates a type-safe settings object from a schema definition.
+ * Generates a type-safe settings object from a schema (synchronous).
+ * All fields are resolved lazily on `$value()` call.
+ * The return value includes `$mutate()`, `$reset()`, and `$load()` methods.
+ * - `$mutate(overrides)` — temporarily overrides settings values
+ * - `$reset()` — restores mutated values to their originals
+ * - `$load()` — eagerly resolves and validates all fields (optional)
  *
- * Validates all fields before throwing, so you see all errors at once.
- * If one or more validations fail, throws {@link SettingsValidationError}.
- *
- * @param schema - The settings schema definition
- * @param options - Options for loading (prefix, envFile)
- * @returns The resolved settings object
- * @throws {SettingsValidationError} When one or more field validations fail
+ * @param schema - Schema containing field definitions
+ * @param options.prefix - Prefix applied to environment variable keys (default: `""`)
+ * @param options.source - Environment variable source (default: `process.env`)
+ * @param options.frozen - When true, disables mutate/reset
+ * @param options.maskSecrets - Whether to mask error messages for secret-related fields (default: true)
+ * @param options.changeCase - Whether to convert schema keys to UPPER_SNAKE_CASE (default: true)
  */
-export function loadSettings<const T extends SettingsSchema>(
+export function defineSettings<const T extends SettingsSchema>(
   schema: T,
   options: SettingsOptions = {},
-): InferSettings<T> {
-  const { prefix = "", envFile } = options;
-  const env = buildEnvSource(envFile);
+): MutableSettings<InferSettings<T>> {
+  const {
+    prefix = "",
+    source: explicitSource,
+    frozen = false,
+    maskSecrets = true,
+    changeCase = true,
+  } = options;
 
-  const errors: SettingsError[] = [];
-  const result: Record<string, unknown> = {};
-
-  // Pass 1: テンプレート以外を解決（エラーは集約）
-  for (const [key, value] of Object.entries(schema)) {
-    result[key] = resolveValue(value, key, prefix, env, errors);
+  for (const key of Object.keys(schema)) {
+    if (RESERVED_SCHEMA_KEYS.has(key)) {
+      throw new SchemaDefinitionError(
+        `Schema key "${key}" conflicts with a reserved settings method name`,
+      );
+    }
   }
 
-  // Pass 2: テンプレートを解決（Pass 1 でエラーがあればスキップ — 依存先が undefined の誤報を防ぐ）
-  if (errors.length === 0) {
-    resolveTemplates(schema, result, result, errors);
-  }
+  /* c8 ignore start */
+  // biome-ignore lint/suspicious/noExplicitAny: browser env fallback unreachable in Node.js
+  const processEnv: EnvSource = (globalThis as any).process?.env ?? {};
+  /* c8 ignore stop */
+  const envSource: EnvSource = explicitSource ? { ...explicitSource } : processEnv;
 
-  if (errors.length > 0) throw new SettingsValidationError(errors);
+  const store = buildStore(
+    schema as Record<string, unknown>,
+    prefix,
+    envSource,
+    maskSecrets,
+    changeCase,
+  );
 
-  return result as InferSettings<T>;
+  return createSettingsProxy<InferSettings<T>>(store, frozen) as MutableSettings<InferSettings<T>>;
 }

@@ -8,26 +8,25 @@ Please check the following before submitting a PR.
 # Install
 pnpm install
 
-# Linter & Formatter
-pnpm run lint
-pnpm run format
+# Lint & Format
+pnpm lint
 
 # Type Check
-pnpm run typecheck
+pnpm typecheck
 
 # Tests
-pnpm run test
+pnpm test
 
 # Build
-pnpm run build
+pnpm build
 ```
 
 Make sure all checks pass before creating a PR.
 
 ## Coding Conventions
 
-- Formatting follows Biome (`pnpm run format`)
-- Function names in `fields.ts` use a `Type` suffix (e.g. `StringType`) to avoid conflicts with global constructors; short names are aliased via `export const String = StringType`
+- Formatting follows Biome (`pnpm lint`)
+- Field type factories live in `src/types/factories.ts` and use camelCase names (e.g. `stringType`, `numberType`). They are exported via the `types` namespace in `src/index.ts` as `t.string()`, `t.number()`, etc.
 - Always add tests for new features
 - Place tests in the `tests/` directory
 

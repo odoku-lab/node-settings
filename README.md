@@ -3,238 +3,443 @@
 [![CI](https://github.com/odoku-lab/node-settings/actions/workflows/ci.yml/badge.svg)](https://github.com/odoku-lab/node-settings/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A type-safe settings loader for Node.js and TypeScript. Reads environment variables, constants, and templates from a single schema definition and returns a fully typed settings object.
+A type-safe environment variable / settings loader for Node.js and TypeScript. Define your schema once and get a fully-typed, lazily-evaluated settings object.
+
+- **Lazy evaluation** — all fields resolve on demand via `$value()` / `$resolve()`
+- **Secret management** — built-in TTL caching and adapters for AWS, Azure, GCP, and HashiCorp Vault
+- **Nested groups** — structure related settings with `t.object()`
+- **Mutation & reset** — override values at runtime without touching `process.env`
+- **Schema validation** — plug in Zod or Valibot schemas
+- **Change tracking** — subscribe to value changes with `$onChange()`
 
 ## Installation
 
 ```bash
 npm install @odoku-lab/settings
-# or
-pnpm add @odoku-lab/settings
 ```
 
-To use with Zod or valibot, install them separately:
+## Quick Start
+
+```typescript
+import { defineSettings, types as t } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  PORT:     t.number({ default: 3000 }),
+  HOST:     t.string({ default: "localhost" }),
+  DEBUG:    t.boolean({ default: false }),
+  BASE_URL: t.template("http://{HOST}:{PORT}"),
+});
+
+// Sync fields: use $value()
+console.log(settings.PORT.$value());   // 3000
+console.log(settings.DEBUG.$value());  // false
+
+// Async fields: use $resolve()
+console.log(await settings.BASE_URL.$resolve()); // "http://localhost:3000"
+```
+
+## API Reference
+
+### `defineSettings(schema, options?)`
+
+Creates a type-safe settings proxy from a schema object.
+
+```typescript
+const settings = defineSettings(schema, {
+  prefix:      "APP_",   // prepend to all env var keys (default: "")
+  source:      {},       // use a custom object instead of process.env
+  frozen:      false,    // disable $mutate / $reset (default: false)
+  maskSecrets: true,     // mask values in error messages (default: true)
+  changeCase:  true,     // convert camelCase keys to UPPER_SNAKE_CASE (default: true)
+});
+```
+
+The returned object exposes three control methods alongside your schema fields:
+
+| Method               | Description                                |
+| -------------------- | ------------------------------------------ |
+| `$mutate(overrides)` | Override values at runtime                 |
+| `$reset()`           | Restore all values to their original state |
+| `$load()`            | Eagerly resolve and validate all fields    |
+
+### Field Accessors
+
+Every field returns an accessor object:
+
+| Method          | Available on  | Description                                        |
+| --------------- | ------------- | -------------------------------------------------- |
+| `$value()`      | Sync fields   | Return the resolved value synchronously            |
+| `$resolve()`    | All fields    | Return the resolved value as a Promise             |
+| `$refresh()`    | Async fields  | Force re-fetch (secrets / async funcs)             |
+| `$versions`     | Secret fields | Version history from the secret manager            |
+| `$onChange(cb)` | All fields    | Subscribe to value changes; returns unsubscribe fn |
+
+**Sync fields** (`t.string`, `t.number`, `t.boolean`, `t.date`, `t.url`, `t.duration`, `t.array`, `t.json`, `t.constant`, sync `t.func`) return a `SyncAccessor<T>` that supports both `$value()` and `$resolve()`.
+
+**Async fields** (`t.secret`, async `t.func`, `t.template` referencing async fields) return an `AsyncAccessor<T>` — use `$resolve()`.
+
+### Field Types
+
+#### `t.string(options?)`
+
+Reads a string from the environment.
+
+```typescript
+SERVICE_NAME: t.string({ default: "api" }),
+```
+
+| Option    | Type     | Description                          |
+| --------- | -------- | ------------------------------------ |
+| `key`     | `string` | Override the env var key             |
+| `default` | `string` | Fallback when the env var is missing |
+
+#### `t.number(options?)`
+
+Reads and coerces a number from the environment.
+
+```typescript
+PORT: t.number({ default: 3000 }),
+```
+
+#### `t.boolean(options?)`
+
+Reads a boolean. Truthy strings: `"true"`, `"1"`, `"yes"`, `"on"`.
+
+```typescript
+DEBUG: t.boolean({ default: false }),
+```
+
+#### `t.date(options?)`
+
+Reads and parses a date string. Supported formats: ISO 8601, `YYYY-MM-DD`, `YYYY-MM`, `YYYY`.
+
+```typescript
+RELEASE_DATE: t.date(),
+```
+
+#### `t.url(options?)`
+
+Reads and validates a URL string.
+
+```typescript
+API_ENDPOINT: t.url({ default: "https://api.example.com" }),
+```
+
+#### `t.duration(options?)`
+
+Reads a human-readable duration string (`"5m"`, `"2h30m"`, `"1d"`) and returns milliseconds as a number.
+
+```typescript
+CACHE_TTL: t.duration({ default: "5m" }),
+```
+
+#### `t.array(itemType, options?)`
+
+Reads a comma-separated list and parses each item with `itemType`.
+
+```typescript
+ALLOWED_ORIGINS: t.array(t.string(), { default: ["localhost"] }),
+```
+
+#### `t.json(options?)`
+
+Reads and parses a JSON string.
+
+```typescript
+FEATURE_FLAGS: t.json<{ dark_mode: boolean }>(),
+```
+
+#### `t.constant(value)`
+
+A fixed value, independent of environment variables.
+
+```typescript
+VERSION: t.constant("1.0.0"),
+```
+
+#### `t.func(fn)`
+
+A field whose value is computed by a function. The function receives `{ values }` — a proxy to all other settings fields.
+
+```typescript
+DB_URL: t.func(({ values }) =>
+  `postgresql://${values.DB_HOST.$value()}:${values.DB_PORT.$value()}/mydb`
+),
+```
+
+Async functions make the field async — access via `$resolve()`.
+
+```typescript
+GREETING: t.func(async ({ values }) => {
+  const name = await values.NAME.$resolve();
+  return `Hello, ${name}!`;
+}),
+```
+
+#### `t.template(pattern)`
+
+Interpolates other field values using `{KEY}` syntax. Nested group fields use `{GROUP.FIELD}`.
+
+```typescript
+BASE_URL: t.template("https://{HOST}:{PORT}/api"),
+DB_URL:   t.template("postgresql://{DB.HOST}:{DB.PORT}/mydb"),
+```
+
+Resolves asynchronously if any referenced field is async — use `$resolve()`.
+
+#### `t.object(fields)`
+
+Groups related fields under a namespace. The env var key for a nested field is `{PREFIX}{GROUP_KEY}_{FIELD_KEY}`.
+
+```typescript
+const settings = defineSettings({
+  DB: t.object({
+    HOST: t.string({ default: "localhost" }),
+    PORT: t.number({ default: 5432 }),
+    NAME: t.string(),
+  }),
+});
+
+settings.DB.HOST.$value(); // reads DB_HOST
+settings.DB.PORT.$value(); // reads DB_PORT
+```
+
+#### `t.secret(options)`
+
+Fetches a secret from a secret manager. The env var value is the **name** of the secret in the manager. Responses are cached with a configurable TTL.
+
+```typescript
+DB_CREDENTIALS: t.secret({
+  adapter: AWSSecretsManager({ region: "us-east-1" }),
+  schema: {
+    host:     t.string(),
+    port:     t.number(),
+    password: t.string(),
+  },
+  ttl: "1h",
+}),
+```
+
+| Option    | Type                      | Description                                        |
+| --------- | ------------------------- | -------------------------------------------------- |
+| `adapter` | `SecretAdapter \| string` | Adapter instance or registered adapter name        |
+| `schema`  | `SettingsSchema`          | Schema for parsing the secret's JSON value         |
+| `ttl`     | `string \| number`        | Cache TTL (duration string or ms). Default: `"1h"` |
+| `key`     | `string`                  | Override the env var key for the secret name       |
+
+Access via `$resolve()`:
+
+```typescript
+const creds = await settings.DB_CREDENTIALS.$resolve();
+console.log(creds.host.$value());
+```
+
+Force-refresh a cached secret:
+
+```typescript
+await settings.DB_CREDENTIALS.$refresh();
+```
+
+#### `t.zodSchema(schema, options?)`
+
+Validates the field value with a Zod schema (requires `zod` peer dependency).
+
+```typescript
+import { z } from "zod";
+
+CONFIG: t.zodSchema(z.object({ debug: z.boolean() })),
+```
+
+#### `t.valibotSchema(schema, options?)`
+
+Validates the field value with a Valibot schema (requires `valibot` peer dependency).
+
+```typescript
+import * as v from "valibot";
+
+CONFIG: t.valibotSchema(v.object({ debug: v.boolean() })),
+```
+
+## Secret Adapters
+
+### AWS Secrets Manager
 
 ```bash
-npm install zod
-npm install valibot
+npm install @aws-sdk/client-secrets-manager
 ```
 
-## Features
-
-- **Type-safe** — return type is automatically inferred from the schema definition
-- **Error aggregation** — validates all fields and reports errors together instead of stopping at the first failure
-- **Templates** — reference resolved values from other fields using `{KEY}` syntax
-- **Nested groups** — organize settings in a hierarchical structure
-- **No side effects** — `envFile` does not pollute `process.env`
-- **Zod / valibot support** — plug in any schema validation library
-
-## Basic Usage
-
 ```typescript
-import { fields, loadSettings } from "@odoku-lab/settings"
+import { defineSettings, types as t, AWSSecretsManager } from "@odoku-lab/settings";
 
-const settings = loadSettings({
-  DEBUG:   fields.Boolean({ default: false }),
-  PORT:    fields.Number({ default: 3000 }),
-  API_URL: fields.String(),                          // required
-  WEBHOOK: fields.String({ optional: true }),        // optional → string | undefined
-}, {
-  prefix:  "APP_",   // reads APP_DEBUG, APP_PORT ...
-  envFile: ".env",   // optional. only reads .env when specified
-})
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: AWSSecretsManager({ region: "us-east-1" }),
+  }),
+});
 
-settings.DEBUG    // boolean
-settings.PORT     // number
-settings.API_URL  // string
-settings.WEBHOOK  // string | undefined
+const key = await settings.API_KEY.$resolve();
 ```
 
-## Field Factories
+### Azure Key Vault
 
-All fields are imported from `import { fields } from "@odoku-lab/settings"`.
-
-### fields.String
-
-```typescript
-fields.String()                                       // required, string
-fields.String({ default: "localhost" })               // with default value
-fields.String({ optional: true })                     // optional, string | undefined
-fields.String({ key: "DB_HOST" })                     // override key name
-fields.String({ regex: /^[a-z0-9]+$/ })              // regex validation
-fields.String({ options: ["dev", "prod"] as const })  // allowed values → "dev" | "prod"
+```bash
+npm install @azure/keyvault-secrets @azure/identity
 ```
 
-### fields.Number
-
 ```typescript
-fields.Number()                                       // required, number
-fields.Number({ default: 3000 })                      // with default value
-fields.Number({ options: [80, 443, 8080] as const })  // allowed values → 80 | 443 | 8080
+import { AzureKeyVault } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: AzureKeyVault({ vaultUrl: "https://my-vault.vault.azure.net" }),
+  }),
+});
 ```
 
-### fields.Boolean
+### GCP Secret Manager
 
-Comparison is case-insensitive (recognizes `"TRUE"`, `"True"`, etc.).
-
-```typescript
-fields.Boolean()                                          // required, boolean
-fields.Boolean({ default: false })                        // with default value
-fields.Boolean({ trueValues: ["on", "enabled"] })         // values treated as true (default: "true", "1", "yes")
-fields.Boolean({ falseValues: ["off", "disabled"] })      // values treated as false (default: "false", "0", "no")
-fields.Boolean({ allowUnrecognized: false })              // throw on values matching neither true nor false
+```bash
+npm install @google-cloud/secret-manager
 ```
 
-### fields.Date
-
 ```typescript
-fields.Date()                                         // parse ISO 8601 string → Date
-fields.Date({ format: "yyyy-MM-dd" })                 // parse with date-fns format
+import { GCPSecretManager } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: GCPSecretManager({ projectId: "my-project" }),
+  }),
+});
 ```
 
-### fields.Array
+### HashiCorp Vault (KV)
 
-```typescript
-fields.Array()                                        // comma-separated string → string[]
-fields.Array({ type: fields.Number() })                    // convert each element → number[]
-fields.Array({ type: fields.String(), delimiter: "|" })    // custom delimiter
-fields.Array({ default: [] })                         // with default value
+```bash
+npm install node-vault
 ```
 
-An empty string env var (`TAGS=""`) is treated as an empty array `[]`.
-
-### fields.Json
-
 ```typescript
-fields.Json()                                         // JSON.parse → unknown
-fields.Json<{ port: number }>()                       // narrow with type parameter
+import { VaultKV } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: VaultKV({
+      endpoint: "http://vault:8200",
+      token:    process.env.VAULT_TOKEN,
+    }),
+  }),
+});
 ```
 
-### fields.ZodSchema
+### Named Adapter Registry
 
-Use a Zod schema directly. Set default values via Zod's `.default()`. Specify `optional: true` to return `undefined` when the env var is not set.
+Register an adapter globally to reference it by name in any `t.secret()` call.
 
 ```typescript
-import { z } from "zod"
-import { fields } from "@odoku-lab/settings"
+import { registerAdapter } from "@odoku-lab/settings";
 
-fields.ZodSchema({ schema: z.coerce.number().int().min(1).max(65535) })
-fields.ZodSchema({ schema: z.coerce.number().default(3000) })
-fields.ZodSchema({ schema: z.string().email() })
-fields.ZodSchema({ schema: z.string(), optional: true })  // undefined when unset
+registerAdapter("production", AWSSecretsManager({ region: "us-east-1" }));
+
+const settings = defineSettings({
+  API_KEY: t.secret({ adapter: "production" }),
+});
 ```
 
-### fields.ValibotSchema
+## Eager Validation with `$load()`
 
-Use a valibot schema directly. Works with any schema compliant with Standard Schema v1. Specify `optional: true` to return `undefined` when the env var is not set.
+Call `$load()` at startup to resolve and validate every field upfront. Any missing or invalid values throw a `SettingsValidationError`.
 
 ```typescript
-import * as v from "valibot"
-import { fields } from "@odoku-lab/settings"
+const settings = defineSettings({
+  PORT:    t.number(),
+  DB_HOST: t.string(),
+});
 
-fields.ValibotSchema({ schema: v.pipe(v.string(), v.transform(Number), v.number()) })
-fields.ValibotSchema({ schema: v.fallback(v.pipe(v.string(), v.transform(Number), v.number()), 3000) })
-fields.ValibotSchema({ schema: v.string(), optional: true })  // undefined when unset
+await settings.$load();
 ```
 
-### fields.Template
+## Mutation and Reset
 
-Reference resolved values from other fields using `{KEY}` / `{GROUP.KEY}` syntax.
+Override values at runtime — useful for tests or feature flags.
 
 ```typescript
-fields.Template("postgresql://{HOST}:{PORT}/mydb")
-fields.Template("https://{DATABASE.HOST}:{DATABASE.PORT}/api")
+settings.$mutate({ PORT: 9000 });
+console.log(settings.PORT.$value()); // 9000
+
+settings.$reset();
+console.log(settings.PORT.$value()); // original value
 ```
 
-## Common Options
-
-Most field factories accept the following options:
-
-| Option                  | Description                                                               |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `key`                   | Env var key name. Defaults to schema field name + prefix                  |
-| `key: { name, prefix }` | Object form to override the prefix individually                           |
-| `default`               | Default value used when the env var is not set                            |
-| `optional: true`        | Returns `undefined` when unset instead of throwing an error               |
-
-## Constant Fields
-
-Returns the value as-is without reading an environment variable. Works with primitives, Date, arrays, and objects.
+A frozen settings object rejects mutations:
 
 ```typescript
-const s = loadSettings({
-  SECRET: "my-secret",          // type: "my-secret"
-  VERSION: 2,                   // type: 2
-  FLAG: true,                   // type: true
-  TAGS: ["a", "b"] as const,   // type: readonly ["a", "b"]
-  TODAY: new Date(),            // type: Date
-  META: { host: "localhost" },  // type: { host: string } (returned as-is)
-})
+const settings = defineSettings(schema, { frozen: true });
+settings.$mutate({ PORT: 9000 }); // throws FrozenSettingsError
 ```
 
-## Nested Groups
-
-Objects containing `fields.*` fields are resolved recursively as groups.
+## Change Tracking
 
 ```typescript
-const s = loadSettings({
-  DATABASE: {
-    HOST: fields.String({ key: { name: "DB_HOST", prefix: "" } }),
-    PORT: fields.Number({ key: { name: "DB_PORT", prefix: "" } }),
-    URL:  fields.Template("postgresql://{DATABASE.HOST}:{DATABASE.PORT}/mydb"),
-  },
-})
+const unsubscribe = settings.PORT.$onChange((newValue, oldValue) => {
+  console.log(`PORT changed from ${oldValue} to ${newValue}`);
+});
 
-s.DATABASE.HOST  // string
-s.DATABASE.PORT  // number
-s.DATABASE.URL   // "postgresql://pg.example.com:5432/mydb"
+settings.$mutate({ PORT: 9000 }); // triggers callback
+
+unsubscribe();
 ```
 
-## Prefix and Key Overrides
+## `changeCase` Option
 
-`prefix` is prepended to all env var keys. To use a different prefix for a specific field, specify `key` as an object.
+When `changeCase: true` (the default), camelCase schema keys are automatically converted to `UPPER_SNAKE_CASE` env var names.
 
 ```typescript
-loadSettings({
-  PORT: fields.Number(),                                          // → APP_PORT
-  HOST: fields.String({ key: { name: "DB_HOST", prefix: "" } }), // → DB_HOST (ignores prefix)
-}, { prefix: "APP_" })
+const settings = defineSettings({
+  dbHost: t.string({ default: "localhost" }), // reads DB_HOST
+  apiKey: t.string(),                          // reads API_KEY
+});
 ```
 
 ## Error Handling
 
-`loadSettings` validates all fields first, then throws a single `SettingsValidationError` containing all errors.
+| Error class               | When thrown                                                  |
+| ------------------------- | ------------------------------------------------------------ |
+| `MissingEnvError`         | Required env var is not set                                  |
+| `InvalidValueError`       | Value fails type coercion or schema validation               |
+| `SchemaDefinitionError`   | Template references a non-existent field                     |
+| `SettingsValidationError` | Aggregated error from `$load()` — contains `.errors` array   |
+| `FrozenSettingsError`     | `$mutate()` or `$reset()` called on a frozen settings object |
+| `SettingsError`           | Base class for all settings errors                           |
 
 ```typescript
-import {
-  loadSettings,
-  SettingsValidationError,
-  MissingEnvError,
-  InvalidValueError,
-} from "@odoku-lab/settings"
+import { SettingsValidationError } from "@odoku-lab/settings";
 
 try {
-  const s = loadSettings({ /* ... */ })
+  await settings.$load();
 } catch (e) {
   if (e instanceof SettingsValidationError) {
     for (const err of e.errors) {
-      if (err instanceof MissingEnvError)   console.error("Missing:", err.fieldName)
-      if (err instanceof InvalidValueError) console.error("Invalid:", err.fieldName)
+      console.error(err.message);
     }
   }
 }
 ```
 
-| Error class               | Condition                                                             |
-| ------------------------- | --------------------------------------------------------------------- |
-| `SettingsError`           | Base class for all errors                                             |
-| `MissingEnvError`         | Required env var is not set                                           |
-| `InvalidValueError`       | Type conversion or validation failed                                  |
-| `SchemaDefinitionError`   | Schema definition error (e.g. missing template target, async schema)  |
-| `SettingsValidationError` | One or more field validations failed (individual errors in `.errors`) |
+## Type Utilities
 
-## Notes
+```typescript
+import type { InferSettings, InferRawSettings, InferValue } from "@odoku-lab/settings";
 
-- **Empty string env vars** — When an env var is set to an empty string (e.g. `APP_PORT=""`), it is treated as "has a value" and `default` is not used. For types that require conversion (e.g. `number`), this results in `InvalidValueError`. Exception: `fields.Array` treats empty strings as an empty array `[]`.
-- **`envFile` and `process.env`** — The contents of `envFile` are read locally without modifying `process.env`. Existing `process.env` values take precedence over `envFile`.
-- **Templates and error aggregation** — If a field referenced by a template fails to resolve (e.g. `MissingEnvError`), the template is skipped. Once the Pass 1 errors are resolved, the Pass 2 templates will evaluate correctly.
+const schema = {
+  PORT: t.number({ default: 3000 }),
+  HOST: t.string({ default: "localhost" }),
+};
+
+type AppSettings    = InferSettings<typeof schema>;    // { PORT: SyncAccessor<number>; HOST: SyncAccessor<string> }
+type RawSettings    = InferRawSettings<typeof schema>; // raw accessor types
+type PortValue      = InferValue<typeof schema.PORT>;  // number
+```
+
+## License
+
+MIT
