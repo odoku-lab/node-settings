@@ -3,238 +3,443 @@
 [![CI](https://github.com/odoku-lab/node-settings/actions/workflows/ci.yml/badge.svg)](https://github.com/odoku-lab/node-settings/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Node.js と TypeScript のための型安全な設定ローダー。環境変数・定数・テンプレートを 1 つのスキーマ定義から読み込み、型推論された設定オブジェクトを返します。
+Node.js と TypeScript のための型安全な環境変数 / 設定ローダー。スキーマを一度定義するだけで、完全な型推論付きの遅延評価設定オブジェクトを返します。
+
+- **遅延評価** — すべてのフィールドは `$value()` / `$resolve()` によりオンデマンドで解決
+- **シークレット管理** — AWS・Azure・GCP・HashiCorp Vault 対応のアダプターと TTL キャッシュを内蔵
+- **ネストグループ** — `t.object()` で関連する設定をまとめて管理
+- **ミューテーション & リセット** — `process.env` に触れずにランタイムで値を上書き
+- **スキーマバリデーション** — Zod または Valibot を接続可能
+- **変更追跡** — `$onChange()` で値の変化を購読
 
 ## インストール
 
 ```bash
 npm install @odoku-lab/settings
-# または
-pnpm add @odoku-lab/settings
 ```
 
-Zod または valibot と組み合わせて使う場合は、それぞれ追加でインストールしてください。
+## クイックスタート
+
+```typescript
+import { defineSettings, types as t } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  PORT:     t.number({ default: 3000 }),
+  HOST:     t.string({ default: "localhost" }),
+  DEBUG:    t.boolean({ default: false }),
+  BASE_URL: t.template("http://{HOST}:{PORT}"),
+});
+
+// 同期フィールドは $value() でアクセス
+console.log(settings.PORT.$value());   // 3000
+console.log(settings.DEBUG.$value());  // false
+
+// 非同期フィールドは $resolve() でアクセス
+console.log(await settings.BASE_URL.$resolve()); // "http://localhost:3000"
+```
+
+## API リファレンス
+
+### `defineSettings(schema, options?)`
+
+スキーマオブジェクトから型安全な設定プロキシを生成します。
+
+```typescript
+const settings = defineSettings(schema, {
+  prefix:      "APP_",   // すべての環境変数キーに付けるプレフィックス (デフォルト: "")
+  source:      {},       // process.env の代わりに使うカスタムオブジェクト
+  frozen:      false,    // $mutate / $reset を無効にする (デフォルト: false)
+  maskSecrets: true,     // エラーメッセージ内の値をマスクする (デフォルト: true)
+  changeCase:  true,     // camelCase のキーを UPPER_SNAKE_CASE に変換する (デフォルト: true)
+});
+```
+
+返却オブジェクトにはスキーマフィールドに加えて、以下の制御メソッドが含まれます。
+
+| メソッド             | 説明                                         |
+| -------------------- | -------------------------------------------- |
+| `$mutate(overrides)` | ランタイムで値を上書き                       |
+| `$reset()`           | すべての値を元の状態に戻す                   |
+| `$load()`            | すべてのフィールドを即時解決・バリデーション |
+
+### フィールドアクセサー
+
+すべてのフィールドはアクセサーオブジェクトを返します。
+
+| メソッド        | 利用可能なフィールド   | 説明                                               |
+| --------------- | ---------------------- | -------------------------------------------------- |
+| `$value()`      | 同期フィールド         | 解決済みの値を同期で返す                           |
+| `$resolve()`    | すべてのフィールド     | 解決済みの値を Promise で返す                      |
+| `$refresh()`    | 非同期フィールド       | 再フェッチを強制する（シークレット / 非同期 func） |
+| `$versions`     | シークレットフィールド | シークレットマネージャーのバージョン履歴           |
+| `$onChange(cb)` | すべてのフィールド     | 値の変化を購読。解除関数を返す                     |
+
+**同期フィールド** (`t.string`、`t.number`、`t.boolean`、`t.date`、`t.url`、`t.duration`、`t.array`、`t.json`、`t.constant`、同期 `t.func`) は `SyncAccessor<T>` を返し、`$value()` と `$resolve()` の両方が使用できます。
+
+**非同期フィールド** (`t.secret`、非同期 `t.func`、非同期フィールドを参照する `t.template`) は `AsyncAccessor<T>` を返します。`$resolve()` を使用してください。
+
+### フィールド型
+
+#### `t.string(options?)`
+
+環境変数から文字列を読み込みます。
+
+```typescript
+SERVICE_NAME: t.string({ default: "api" }),
+```
+
+| オプション | 型       | 説明                                 |
+| ---------- | -------- | ------------------------------------ |
+| `key`      | `string` | 環境変数キーを上書き                 |
+| `default`  | `string` | 環境変数がない場合のフォールバック値 |
+
+#### `t.number(options?)`
+
+環境変数から数値を読み込みます。
+
+```typescript
+PORT: t.number({ default: 3000 }),
+```
+
+#### `t.boolean(options?)`
+
+ブール値を読み込みます。真値となる文字列: `"true"`、`"1"`、`"yes"`、`"on"`。
+
+```typescript
+DEBUG: t.boolean({ default: false }),
+```
+
+#### `t.date(options?)`
+
+日付文字列を読み込んでパースします。対応フォーマット: ISO 8601、`YYYY-MM-DD`、`YYYY-MM`、`YYYY`。
+
+```typescript
+RELEASE_DATE: t.date(),
+```
+
+#### `t.url(options?)`
+
+URL 文字列を読み込んでバリデーションします。
+
+```typescript
+API_ENDPOINT: t.url({ default: "https://api.example.com" }),
+```
+
+#### `t.duration(options?)`
+
+人間が読めるデュレーション文字列 (`"5m"`、`"2h30m"`、`"1d"`) を読み込み、ミリ秒の数値として返します。
+
+```typescript
+CACHE_TTL: t.duration({ default: "5m" }),
+```
+
+#### `t.array(itemType, options?)`
+
+カンマ区切りのリストを読み込み、各要素を `itemType` でパースします。
+
+```typescript
+ALLOWED_ORIGINS: t.array(t.string(), { default: ["localhost"] }),
+```
+
+#### `t.json(options?)`
+
+JSON 文字列を読み込んでパースします。
+
+```typescript
+FEATURE_FLAGS: t.json<{ dark_mode: boolean }>(),
+```
+
+#### `t.constant(value)`
+
+環境変数に依存しない固定値を定義します。
+
+```typescript
+VERSION: t.constant("1.0.0"),
+```
+
+#### `t.func(fn)`
+
+関数によって値が計算されるフィールドです。関数は `{ values }` — 他のすべての設定フィールドへのプロキシ — を受け取ります。
+
+```typescript
+DB_URL: t.func(({ values }) =>
+  `postgresql://${values.DB_HOST.$value()}:${values.DB_PORT.$value()}/mydb`
+),
+```
+
+非同期関数を渡した場合、フィールドは非同期になります (`$resolve()` を使用)。
+
+```typescript
+GREETING: t.func(async ({ values }) => {
+  const name = await values.NAME.$resolve();
+  return `Hello, ${name}!`;
+}),
+```
+
+#### `t.template(pattern)`
+
+`{KEY}` 構文で他のフィールドの値を補間します。ネストしたグループのフィールドは `{GROUP.FIELD}` で参照します。
+
+```typescript
+BASE_URL: t.template("https://{HOST}:{PORT}/api"),
+DB_URL:   t.template("postgresql://{DB.HOST}:{DB.PORT}/mydb"),
+```
+
+参照するフィールドが非同期の場合、テンプレートも非同期になります (`$resolve()` を使用)。
+
+#### `t.object(fields)`
+
+関連するフィールドをネームスペースにまとめます。ネストしたフィールドの環境変数キーは `{PREFIX}{GROUP_KEY}_{FIELD_KEY}` になります。
+
+```typescript
+const settings = defineSettings({
+  DB: t.object({
+    HOST: t.string({ default: "localhost" }),
+    PORT: t.number({ default: 5432 }),
+    NAME: t.string(),
+  }),
+});
+
+settings.DB.HOST.$value(); // DB_HOST を読み込む
+settings.DB.PORT.$value(); // DB_PORT を読み込む
+```
+
+#### `t.secret(options)`
+
+シークレットマネージャーからシークレットをフェッチします。環境変数の値はマネージャー内の**シークレット名**として使用されます。レスポンスは設定可能な TTL でキャッシュされます。
+
+```typescript
+DB_CREDENTIALS: t.secret({
+  adapter: AWSSecretsManager({ region: "us-east-1" }),
+  schema: {
+    host:     t.string(),
+    port:     t.number(),
+    password: t.string(),
+  },
+  ttl: "1h",
+}),
+```
+
+| オプション | 型                        | 説明                                                                  |
+| ---------- | ------------------------- | --------------------------------------------------------------------- |
+| `adapter`  | `SecretAdapter \| string` | アダプターインスタンスまたは登録済みアダプター名                      |
+| `schema`   | `SettingsSchema`          | シークレットの JSON 値をパースするスキーマ                            |
+| `ttl`      | `string \| number`        | キャッシュ TTL (デュレーション文字列またはミリ秒)。デフォルト: `"1h"` |
+| `key`      | `string`                  | シークレット名の環境変数キーを上書き                                  |
+
+`$resolve()` でアクセスします。
+
+```typescript
+const creds = await settings.DB_CREDENTIALS.$resolve();
+console.log(creds.host.$value());
+```
+
+キャッシュを強制更新する場合は `$refresh()` を呼び出します。
+
+```typescript
+await settings.DB_CREDENTIALS.$refresh();
+```
+
+#### `t.zodSchema(schema, options?)`
+
+Zod スキーマでフィールドの値をバリデーションします (`zod` ピア依存が必要)。
+
+```typescript
+import { z } from "zod";
+
+CONFIG: t.zodSchema(z.object({ debug: z.boolean() })),
+```
+
+#### `t.valibotSchema(schema, options?)`
+
+Valibot スキーマでフィールドの値をバリデーションします (`valibot` ピア依存が必要)。
+
+```typescript
+import * as v from "valibot";
+
+CONFIG: t.valibotSchema(v.object({ debug: v.boolean() })),
+```
+
+## シークレットアダプター
+
+### AWS Secrets Manager
 
 ```bash
-npm install zod
-npm install valibot
+npm install @aws-sdk/client-secrets-manager
 ```
 
-## 特徴
-
-- **型安全** — スキーマ定義から戻り値の型を自動推論
-- **エラー集約** — 最初のエラーで停止せず、全フィールドを検証してまとめて報告
-- **テンプレート** — 他フィールドの解決済み値を `{KEY}` 形式で参照
-- **ネストグループ** — 設定を階層化して整理
-- **副作用なし** — `envFile` 指定時も `process.env` を汚染しません
-- **Zod / valibot 対応** — 任意のスキーマバリデーションライブラリを組み込めます
-
-## 基本的な使い方
-
 ```typescript
-import { fields, loadSettings } from "@odoku-lab/settings"
+import { defineSettings, types as t, AWSSecretsManager } from "@odoku-lab/settings";
 
-const settings = loadSettings({
-  DEBUG:   fields.Boolean({ default: false }),
-  PORT:    fields.Number({ default: 3000 }),
-  API_URL: fields.String(),                          // 必須
-  WEBHOOK: fields.String({ optional: true }),        // 任意 → string | undefined
-}, {
-  prefix:  "APP_",   // APP_DEBUG, APP_PORT ... を参照
-  envFile: ".env",   // 省略可。指定時のみ .env を読み込む
-})
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: AWSSecretsManager({ region: "us-east-1" }),
+  }),
+});
 
-settings.DEBUG    // boolean
-settings.PORT     // number
-settings.API_URL  // string
-settings.WEBHOOK  // string | undefined
+const key = await settings.API_KEY.$resolve();
 ```
 
-## フィールドファクトリ
+### Azure Key Vault
 
-すべてのフィールドは `import { fields } from "@odoku-lab/settings"` からインポートします。
-
-### fields.String
-
-```typescript
-fields.String()                                       // 必須, string
-fields.String({ default: "localhost" })               // デフォルト値あり
-fields.String({ optional: true })                     // 任意, string | undefined
-fields.String({ key: "DB_HOST" })                     // キー名を上書き
-fields.String({ regex: /^[a-z0-9]+$/ })              // 正規表現バリデーション
-fields.String({ options: ["dev", "prod"] as const })  // 許容値の列挙 → "dev" | "prod"
+```bash
+npm install @azure/keyvault-secrets @azure/identity
 ```
 
-### fields.Number
-
 ```typescript
-fields.Number()                                       // 必須, number
-fields.Number({ default: 3000 })                      // デフォルト値あり
-fields.Number({ options: [80, 443, 8080] as const })  // 許容値の列挙 → 80 | 443 | 8080
+import { AzureKeyVault } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: AzureKeyVault({ vaultUrl: "https://my-vault.vault.azure.net" }),
+  }),
+});
 ```
 
-### fields.Boolean
+### GCP Secret Manager
 
-比較は大文字小文字を区別しません（`"TRUE"`, `"True"` なども認識されます）。
-
-```typescript
-fields.Boolean()                                          // 必須, boolean
-fields.Boolean({ default: false })                        // デフォルト値あり
-fields.Boolean({ trueValues: ["on", "enabled"] })         // 真とみなす文字列（デフォルト: "true", "1", "yes"）
-fields.Boolean({ falseValues: ["off", "disabled"] })      // 偽とみなす文字列（デフォルト: "false", "0", "no"）
-fields.Boolean({ allowUnrecognized: false })              // true/false どちらにも該当しない値をエラーにする
+```bash
+npm install @google-cloud/secret-manager
 ```
 
-### fields.Date
-
 ```typescript
-fields.Date()                                         // ISO 8601 文字列をパース → Date
-fields.Date({ format: "yyyy-MM-dd" })                 // date-fns フォーマットでパース
+import { GCPSecretManager } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: GCPSecretManager({ projectId: "my-project" }),
+  }),
+});
 ```
 
-### fields.Array
+### HashiCorp Vault (KV)
 
-```typescript
-fields.Array()                                        // カンマ区切り文字列 → string[]
-fields.Array({ type: fields.Number() })                    // 要素ごとに変換 → number[]
-fields.Array({ type: fields.String(), delimiter: "|" })    // デリミタを変更
-fields.Array({ default: [] })                         // デフォルト値あり
+```bash
+npm install node-vault
 ```
 
-空文字列の環境変数（`TAGS=""`）は空配列 `[]` として扱われます。
-
-### fields.Json
-
 ```typescript
-fields.Json()                                         // JSON.parse → unknown
-fields.Json<{ port: number }>()                       // 型パラメータで型を絞り込み
+import { VaultKV } from "@odoku-lab/settings";
+
+const settings = defineSettings({
+  API_KEY: t.secret({
+    adapter: VaultKV({
+      endpoint: "http://vault:8200",
+      token:    process.env.VAULT_TOKEN,
+    }),
+  }),
+});
 ```
 
-### fields.ZodSchema
+### 名前付きアダプターレジストリ
 
-Zod スキーマを直接使います。デフォルト値は Zod 側の `.default()` で設定してください。環境変数が未設定のときに `undefined` を返したい場合は `optional: true` を指定します。
+アダプターをグローバルに登録し、任意の `t.secret()` 呼び出しで名前で参照できます。
 
 ```typescript
-import { z } from "zod"
-import { fields } from "@odoku-lab/settings"
+import { registerAdapter } from "@odoku-lab/settings";
 
-fields.ZodSchema({ schema: z.coerce.number().int().min(1).max(65535) })
-fields.ZodSchema({ schema: z.coerce.number().default(3000) })
-fields.ZodSchema({ schema: z.string().email() })
-fields.ZodSchema({ schema: z.string(), optional: true })  // 未設定なら undefined
+registerAdapter("production", AWSSecretsManager({ region: "us-east-1" }));
+
+const settings = defineSettings({
+  API_KEY: t.secret({ adapter: "production" }),
+});
 ```
 
-### fields.ValibotSchema
+## `$load()` による即時バリデーション
 
-valibot スキーマを直接使います。Standard Schema v1 に準拠していれば動作します。環境変数が未設定のときに `undefined` を返したい場合は `optional: true` を指定します。
+アプリ起動時に `$load()` を呼び出すことで、すべてのフィールドを即時に解決・バリデーションできます。未設定や不正な値があれば `SettingsValidationError` がスローされます。
 
 ```typescript
-import * as v from "valibot"
-import { fields } from "@odoku-lab/settings"
+const settings = defineSettings({
+  PORT:    t.number(),
+  DB_HOST: t.string(),
+});
 
-fields.ValibotSchema({ schema: v.pipe(v.string(), v.transform(Number), v.number()) })
-fields.ValibotSchema({ schema: v.fallback(v.pipe(v.string(), v.transform(Number), v.number()), 3000) })
-fields.ValibotSchema({ schema: v.string(), optional: true })  // 未設定なら undefined
+await settings.$load();
 ```
 
-### fields.Template
+## `$mutate()` と `$reset()`
 
-`{KEY}` / `{GROUP.KEY}` 形式で他フィールドの解決済み値を参照します。
+ランタイムで値を上書きします。テストや機能フラグに便利です。
 
 ```typescript
-fields.Template("postgresql://{HOST}:{PORT}/mydb")
-fields.Template("https://{DATABASE.HOST}:{DATABASE.PORT}/api")
+settings.$mutate({ PORT: 9000 });
+console.log(settings.PORT.$value()); // 9000
+
+settings.$reset();
+console.log(settings.PORT.$value()); // 元の値
 ```
 
-## 共通オプション
-
-ほとんどのフィールドファクトリは以下のオプションを受け付けます。
-
-| オプション              | 説明                                                              |
-| ----------------------- | ----------------------------------------------------------------- |
-| `key`                   | 参照する環境変数キー名。省略時はスキーマのフィールド名 + prefix   |
-| `key: { name, prefix }` | prefix を個別に上書きする場合はオブジェクト形式で指定             |
-| `default`               | 環境変数が未設定の場合に使うデフォルト値                          |
-| `optional: true`        | 未設定でも `undefined` を返す（エラーになりません）               |
-
-## 定数フィールド
-
-環境変数を参照せず、値をそのまま返します。プリミティブ・Date・配列・オブジェクトのどれでも使えます。
+`frozen: true` で設定をロックすると、ミューテーション時に `FrozenSettingsError` がスローされます。
 
 ```typescript
-const s = loadSettings({
-  SECRET: "my-secret",          // 型: "my-secret"
-  VERSION: 2,                   // 型: 2
-  FLAG: true,                   // 型: true
-  TAGS: ["a", "b"] as const,   // 型: readonly ["a", "b"]
-  TODAY: new Date(),            // 型: Date
-  META: { host: "localhost" },  // 型: { host: string }（そのまま返す）
-})
+const settings = defineSettings(schema, { frozen: true });
+settings.$mutate({ PORT: 9000 }); // FrozenSettingsError をスロー
 ```
 
-## ネストグループ
-
-`fields.*` フィールドを含むオブジェクトはグループとして再帰的に解決されます。
+## 変更追跡
 
 ```typescript
-const s = loadSettings({
-  DATABASE: {
-    HOST: fields.String({ key: { name: "DB_HOST", prefix: "" } }),
-    PORT: fields.Number({ key: { name: "DB_PORT", prefix: "" } }),
-    URL:  fields.Template("postgresql://{DATABASE.HOST}:{DATABASE.PORT}/mydb"),
-  },
-})
+const unsubscribe = settings.PORT.$onChange((newValue, oldValue) => {
+  console.log(`PORT が ${oldValue} から ${newValue} に変わりました`);
+});
 
-s.DATABASE.HOST  // string
-s.DATABASE.PORT  // number
-s.DATABASE.URL   // "postgresql://pg.example.com:5432/mydb"
+settings.$mutate({ PORT: 9000 }); // コールバックが発火
+
+unsubscribe();
 ```
 
-## prefix とキーの上書き
+## `changeCase` オプション
 
-`prefix` はすべての環境変数キーに前置されます。特定フィールドだけ別の prefix にしたい場合は `key` をオブジェクトで指定します。
+`changeCase: true` (デフォルト) の場合、camelCase のスキーマキーは自動的に `UPPER_SNAKE_CASE` の環境変数名に変換されます。
 
 ```typescript
-loadSettings({
-  PORT: fields.Number(),                                          // → APP_PORT
-  HOST: fields.String({ key: { name: "DB_HOST", prefix: "" } }), // → DB_HOST（prefix を無視）
-}, { prefix: "APP_" })
+const settings = defineSettings({
+  dbHost: t.string({ default: "localhost" }), // DB_HOST を読み込む
+  apiKey: t.string(),                          // API_KEY を読み込む
+});
 ```
 
 ## エラーハンドリング
 
-`loadSettings` は全フィールドを検証してから、単一の `SettingsValidationError` にまとめてスローします。
+| エラークラス              | スローされるタイミング                                    |
+| ------------------------- | --------------------------------------------------------- |
+| `MissingEnvError`         | 必須の環境変数が未設定                                    |
+| `InvalidValueError`       | 値の型変換またはスキーマバリデーションに失敗              |
+| `SchemaDefinitionError`   | テンプレートが存在しないフィールドを参照                  |
+| `SettingsValidationError` | `$load()` からの集約エラー — `.errors` 配列を持つ         |
+| `FrozenSettingsError`     | フリーズした設定オブジェクトへの `$mutate()` / `$reset()` |
+| `SettingsError`           | すべての設定エラーの基底クラス                            |
 
 ```typescript
-import {
-  loadSettings,
-  SettingsValidationError,
-  MissingEnvError,
-  InvalidValueError,
-} from "@odoku-lab/settings"
+import { SettingsValidationError } from "@odoku-lab/settings";
 
 try {
-  const s = loadSettings({ /* ... */ })
+  await settings.$load();
 } catch (e) {
   if (e instanceof SettingsValidationError) {
     for (const err of e.errors) {
-      if (err instanceof MissingEnvError)   console.error("未設定:", err.fieldName)
-      if (err instanceof InvalidValueError) console.error("不正な値:", err.fieldName)
+      console.error(err.message);
     }
   }
 }
 ```
 
-| エラークラス              | 発生条件                                                         |
-| ------------------------- | ---------------------------------------------------------------- |
-| `SettingsError`           | 全エラーの基底クラス                                             |
-| `MissingEnvError`         | 必須の環境変数が未設定                                           |
-| `InvalidValueError`       | 型変換またはバリデーションに失敗                                 |
-| `SchemaDefinitionError`   | スキーマ定義の誤り（テンプレート参照先なし、async スキーマなど） |
-| `SettingsValidationError` | 1 つ以上のフィールド検証が失敗（個別エラーは `.errors` に格納）  |
+## 型ユーティリティ
 
-## 注意点
+```typescript
+import type { InferSettings, InferRawSettings, InferValue } from "@odoku-lab/settings";
 
-- **空文字列の環境変数** — `APP_PORT=""` のように空文字列が設定されている場合、「値あり」とみなされ `default` は使われません。`number` など変換が必要な型では `InvalidValueError` になります。例外として `fields.Array` は空文字列を空配列 `[]` として扱います。
-- **`envFile` と `process.env`** — `envFile` の内容はローカルにのみ読み込まれ、`process.env` を変更しません。既存の `process.env` の値が `envFile` より優先されます。
-- **テンプレートとエラー集約** — テンプレートが参照するフィールドの解決に失敗した場合（`MissingEnvError` など）、そのテンプレートはスキップされます。Pass 1 のエラーが解消されれば Pass 2 のテンプレートも正常に評価されます。
+const schema = {
+  PORT: t.number({ default: 3000 }),
+  HOST: t.string({ default: "localhost" }),
+};
+
+type AppSettings = InferSettings<typeof schema>;    // { PORT: SyncAccessor<number>; HOST: SyncAccessor<string> }
+type RawSettings = InferRawSettings<typeof schema>; // 生のアクセサー型
+type PortValue   = InferValue<typeof schema.PORT>;  // number
+```
+
+## ライセンス
+
+MIT

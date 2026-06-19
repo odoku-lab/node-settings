@@ -18,8 +18,12 @@ export class MissingEnvError extends SettingsError {
   /** The logical field name of the missing environment variable. */
   readonly fieldName: string;
 
-  constructor(fieldName: string) {
-    super(`Missing required environment variable: ${fieldName}`);
+  constructor(fieldName = "") {
+    super(
+      fieldName
+        ? `Missing required environment variable: ${fieldName}`
+        : "Missing environment variable",
+    );
     this.name = "MissingEnvError";
     this.fieldName = fieldName;
     Object.setPrototypeOf(this, MissingEnvError.prototype);
@@ -33,11 +37,21 @@ export class InvalidValueError extends SettingsError {
   /** The logical field name that received the invalid value. */
   readonly fieldName: string;
 
-  constructor(fieldName: string, reason: string) {
-    super(`Invalid value for ${fieldName}: ${reason}`);
+  private constructor(message: string, fieldName: string) {
+    super(message);
     this.name = "InvalidValueError";
     this.fieldName = fieldName;
     Object.setPrototypeOf(this, InvalidValueError.prototype);
+  }
+
+  /** Use when a field name cannot be determined, such as a type conversion error. */
+  static forMessage(message: string): InvalidValueError {
+    return new InvalidValueError(message, "");
+  }
+
+  /** Use when a field name can be determined from the resolver. */
+  static forField(fieldName: string, message: string): InvalidValueError {
+    return new InvalidValueError(`Invalid value for ${fieldName}: ${message}`, fieldName);
   }
 }
 
@@ -55,7 +69,7 @@ export class SchemaDefinitionError extends SettingsError {
 /**
  * Aggregates multiple field validation errors into a single report.
  *
- * `loadSettings` validates all fields before throwing, so you can see all
+ * `defineSettings` validates all fields before throwing, so you can see all
  * missing or invalid settings at once during initial setup.
  */
 export class SettingsValidationError extends SettingsError {
@@ -68,5 +82,19 @@ export class SettingsValidationError extends SettingsError {
     this.name = "SettingsValidationError";
     this.errors = errors;
     Object.setPrototypeOf(this, SettingsValidationError.prototype);
+  }
+}
+
+/**
+ * Thrown when attempting to mutate frozen settings.
+ *
+ * `defineSettings` with `frozen: true` disables mutate/reset.
+ * Calling those methods on a frozen settings object throws this error.
+ */
+export class FrozenSettingsError extends SettingsError {
+  constructor(message = "Settings are frozen") {
+    super(message);
+    this.name = "FrozenSettingsError";
+    Object.setPrototypeOf(this, FrozenSettingsError.prototype);
   }
 }

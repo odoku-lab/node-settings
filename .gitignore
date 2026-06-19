@@ -27,6 +27,9 @@ pnpm-debug.log*
 # Dev notes
 TODO.md
 
+# Agent config
+.claude/
+
 # pnpm workspace config (single-package repo)
 pnpm-workspace.yaml
 
