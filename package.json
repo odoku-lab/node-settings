@@ -94,10 +94,11 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "esbuild"
+      "esbuild",
+      "protobufjs"
     ]
   },
-  "packageManager": "pnpm@11.1.2",
+  "packageManager": "pnpm@9.15.9",
   "engines": {
     "node": ">=20",
     "pnpm": ">=9"
